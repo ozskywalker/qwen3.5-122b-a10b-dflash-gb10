@@ -49,7 +49,6 @@ sudo docker run -d \
         --port 8000 \
         --max-model-len 196608 \
         --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${MTP_TOKENS}}" \
-        --moe-backend flashinfer_b12x \
         --gpu-memory-utilization 0.88 \
         --max-num-seqs 8 \
         --max-num-batched-tokens 8192 \

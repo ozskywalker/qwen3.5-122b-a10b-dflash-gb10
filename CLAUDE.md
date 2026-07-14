@@ -50,7 +50,7 @@ sudo docker build -t aeon-vllm-tvm-fixed:latest .
 ./start_vllm_dflash.sh          # speclen=8 (recommended)
 ./start_vllm_dflash.sh 16       # speclen=16 (first arg overrides)
 
-# Start MTP baseline server
+# Start MTP baseline server (note: no --moe-backend flag — MTP heads are BF16, B12X rejects unquantized MoE)
 ./start_vllm_mtp.sh
 
 # Check server health

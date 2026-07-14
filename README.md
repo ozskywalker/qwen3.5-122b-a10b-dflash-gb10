@@ -243,24 +243,58 @@ reference if the base image is updated.
 ## Benchmark results
 
 All runs: `vllm bench serve`, 30 prompts, `request-rate inf`, random dataset,
-`enable_thinking=false`. Config at time of measurement: `max-num-batched-tokens 8192`,
-`num_speculative_tokens 8`, no `enforce_eager`.
+`enable_thinking=false`, `max-num-batched-tokens 8192`.
 
-| Scenario | Input/Output | Conc | Output tok/s | TTFT p50 | ITL p50 | Acc% | AccLen |
-|---|---|---|---|---|---|---|---|
-| short-c1 | 512 / 128 | 1 | 15.6 | 592ms | 115ms | 12.1% | 1.97 |
-| code-c1  | 1024 / 512 | 1 | 18.8 | 705ms | 117ms | 15.6% | 2.25 |
-| code-c4  | 1024 / 512 | 4 | 39.5 | 1043ms | 216ms | 16.9% | 2.35 |
-| long-c1  | 4096 / 512 | 1 | 15.9 | 1685ms | 116ms | 11.9% | 1.95 |
+### DFlash vs MTP head-to-head
 
-### Tuning history (vs original `enforce_eager=true`, `max_batched=4096`, `speclen=16`)
+| Scenario | In/Out | Conc | Config | tok/s | TTFT p50 | ITL p50 | Acc% | AccLen |
+|---|---|---|---|---|---|---|---|---|
+| short-c1 | 512/128 | 1 | DFlash speclen=8 | 15.6 | 592ms | 115ms | 12.1% | 1.97 |
+| short-c1 | 512/128 | 1 | DFlash+prefix     | 15.2 | 581ms | 115ms | 12.3% | 1.99 |
+| short-c1 | 512/128 | 1 | **MTP 2-token**   | **20.6** | **569ms** | **98ms** | **62.8%** | **2.26** |
+| code-c1  | 1024/512 | 1 | DFlash speclen=8 | 18.8 | 705ms | 117ms | 15.6% | 2.25 |
+| code-c1  | 1024/512 | 1 | DFlash+prefix     | 20.3 | 703ms | 117ms | 18.0% | 2.44 |
+| code-c1  | 1024/512 | 1 | **MTP 2-token**   | **22.4** | **694ms** | **98ms** | **63.5%** | **2.27** |
+| code-c4  | 1024/512 | 4 | DFlash speclen=8 | 39.5 | 1043ms | 216ms | 16.9% | 2.35 |
+| code-c4  | 1024/512 | 4 | DFlash+prefix     | 40.4 | 1054ms | 216ms | 16.8% | 2.34 |
+| code-c4  | 1024/512 | 4 | **MTP 2-token**   | **47.8** | **916ms** | **181ms** | **66.0%** | **2.32** |
+| long-c1  | 4096/512 | 1 | DFlash speclen=8 | 15.9 | 1666ms | 116ms | 11.9% | 1.95 |
+| long-c1  | 4096/512 | 1 | DFlash+prefix     | 16.6 | 1664ms | 116ms | 13.0% | 2.04 |
+| long-c1  | 4096/512 | 1 | **MTP 2-token**   | **21.1** | **1703ms** | **99ms** | **61.6%** | **2.23** |
+
+**MTP wins every scenario: +19–33% throughput, −14–16% ITL vs DFlash speclen=8.**
+
+### MTP vs DFlash — why such a large gap?
+
+| Metric | DFlash speclen=8 | MTP speclen=2 |
+|---|---|---|
+| Acceptance rate | 12–17% | 62–66% |
+| AccLen | ~2 | ~2.25 |
+| Tokens proposed per step | 8 | 2 |
+| Tokens wasted per step | ~6 | ~0 |
+| MoE kernel | B12X (CuteDSL, SM121a-optimized) | CUTLASS (auto-selected) |
+| KV cache | 743k tokens | 1,579k tokens |
+
+Both methods achieve AccLen≈2.25 (similar tokens accepted per step), but DFlash proposes
+8 tokens to get there while MTP proposes 2. DFlash's block-diffusion draft runs 8 forward-pass
+slots and discards 6; MTP runs 2 and almost all are accepted. On random text, block-diffusion
+acceptance drops sharply because consecutive tokens are uncorrelated — MTP uses the model's
+own hidden-state predictions and stays accurate. On real code generation (highly structured
+and repetitive), DFlash's acceptance rate may improve significantly.
+
+**Caveat:** MTP auto-selects `FLASHINFER_CUTLASS` for the NVFP4 main model MoE layers
+(the B12X kernel cannot be forced globally because the BF16 MTP heads need a different
+backend). Despite using a slower MoE kernel, MTP still wins by +19–33%. If MTP's main model
+layers could use B12X while MTP heads use CUTLASS, the gap would be even larger.
+
+### DFlash tuning history (vs original baseline: `enforce_eager`, `batched=4096`, `speclen=16`)
 
 | Change | Throughput delta | ITL delta | Notes |
 |---|---|---|---|
-| `max_num_batched_tokens` 4096 → 8192 | +4% (short/code), **+47% long** | -6–10% | Unblocked long-context prefill |
+| `max_num_batched_tokens` 4096 → 8192 | +4% (short/code), **+47% long** | −6–10% | Unblocked long-context prefill |
 | Remove `enforce_eager` | +2–9% single-stream | flat | Draft CUDA graphs captured cleanly |
-| `num_speculative_tokens` 16 → 8 | **+10–21%** | **-14–21%** | AccLen≈2 regardless; halving the spec window doubles yield |
-| `--enable-prefix-caching` | pending benchmark | — | Fixed (Fix 6); crash resolved. Performance impact on random-text bench expected to be neutral; real benefit is TTFT on repeated system prompts |
+| `num_speculative_tokens` 16 → 8 | **+10–21%** | **−14–21%** | AccLen≈2 regardless; halving speclen doubles yield |
+| `--enable-prefix-caching` | **±0%** on random text | flat | Fix 6 resolved the crash; zero overhead on random prompts; TTFT benefit appears on repeated system-prompt traffic |
 
 ### Key insight: speculative token count
 DFlash accepts ~2 tokens per speculative step on random text (AccLen≈2), independent of

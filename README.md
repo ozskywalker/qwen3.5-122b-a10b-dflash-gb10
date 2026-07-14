@@ -186,7 +186,7 @@ for SM121a JIT warmup and torch.compile.
 | `--quantization modelopt_fp4` | NVFP4 | Required for the nvidia NVFP4 checkpoint |
 | `--kv-cache-dtype fp8` | FP8 KV | FP8 KV fits in 128 GB; FlashInfer auto-selects FP8-aware attention |
 | `--moe-backend flashinfer_b12x` | B12X | SM121-compiled NVFP4 MoE kernels; other backends fail with `cudaErrorNoKernelImageForDevice` |
-| `--speculative-config` | dflash, 16 tokens | `enforce_eager: true` needed — DFlash draft doesn't use CUDA graphs |
+| `--speculative-config` | dflash, 8 tokens | AccLen≈2 → speclen=8 gives better yield than 16; CUDA graphs active (no enforce_eager) |
 | `--gpu-memory-utilization 0.88` | 88% | Leave headroom for the SM121a JIT workspace |
 | `--max-model-len 196608` | 192k tokens | Full GB10 context window |
 | `--max-num-seqs 8` | 8 | Limit concurrent sequences; DFlash adds per-sequence draft overhead |
@@ -236,6 +236,7 @@ reference if the base image is updated.
 | 5 | `NotImplementedError: DFlash does not support BACKED_SIZE_OBLIVIOUS` | Draft vllm config inherited `BACKED_SIZE_OBLIVIOUS` dynamic shapes | Fix 5 (`_create_draft_vllm_config`) |
 | 6–12 | Various `AssertionError` / `AttributeError` in propose path | DFlash proposer machinery not wired for the aeon vLLM version | Fix 5 (multiple sub-fixes) |
 | 13 | `AssertionError: window_left mismatch: wrapper=4095 impl=-1` | SlidingWindowSpec → FullAttentionSpec conversion discarded `sliding_window` value, causing incorrect merge | Fix 3b + Fix 4b |
+| 14 | `AssertionError: block_size must be divisible by hash_block_size` with `--enable-prefix-caching` | `resolve_kv_cache_block_sizes` returned `hash_block_size = lcm(all groups) = 8736`; one FullAttentionSpec at 4368 fails `4368 % 8736 != 0` | Fix 6: use `math.gcd(*group_block_sizes)` in the Mamba bail-out path → GCD=4368, all groups pass |
 
 ---
 
@@ -259,7 +260,7 @@ All runs: `vllm bench serve`, 30 prompts, `request-rate inf`, random dataset,
 | `max_num_batched_tokens` 4096 → 8192 | +4% (short/code), **+47% long** | -6–10% | Unblocked long-context prefill |
 | Remove `enforce_eager` | +2–9% single-stream | flat | Draft CUDA graphs captured cleanly |
 | `num_speculative_tokens` 16 → 8 | **+10–21%** | **-14–21%** | AccLen≈2 regardless; halving the spec window doubles yield |
-| `--enable-prefix-caching` | **CRASH** | — | Incompatible: `HybridKVCacheCoordinator` requires all KV group block sizes divisible by `hash_block_size`; DFlash's mixed Mamba+attention+draft groups violate this |
+| `--enable-prefix-caching` | pending benchmark | — | Fixed (Fix 6); crash resolved. Performance impact on random-text bench expected to be neutral; real benefit is TTFT on repeated system prompts |
 
 ### Key insight: speculative token count
 DFlash accepts ~2 tokens per speculative step on random text (AccLen≈2), independent of
@@ -317,11 +318,10 @@ mixed block sizes — not patchable at the Python patch level without a more inv
 
 ## Known limitations
 
-- **Prefix caching incompatible**: `--enable-prefix-caching` causes `AssertionError: block_size
-  must be divisible by hash_block_size` at startup. Root cause: `HybridKVCacheCoordinator`
-  validates all KV groups; DFlash's mixed Mamba+attention+draft groups have block sizes that
-  don't all divide evenly by the scheduler's `hash_block_size`. This is a vLLM limitation
-  requiring changes to the coordinator, not patchable at the Python level.
+- **Prefix caching** — Fixed (Fix 6). `--enable-prefix-caching` is now enabled by default in
+  `start_vllm_dflash.sh`. The fix is in `patches/kv_cache_utils.py`: the Mamba bail-out path
+  in `resolve_kv_cache_block_sizes` now returns `math.gcd(*group_block_sizes)` as
+  `hash_block_size` instead of the LCM, ensuring all KV group block sizes divide evenly.
 
 ## Pending
 

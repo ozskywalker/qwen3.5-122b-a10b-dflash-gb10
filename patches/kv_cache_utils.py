@@ -647,15 +647,23 @@ def resolve_kv_cache_block_sizes(
     if not (cache_config.enable_prefix_caching or connector_enabled):
         return scheduler_block_size, scheduler_block_size
 
-    # Mamba groups with block_size != cache_config.block_size
-    # (mamba_cache_mode != "align") break divisibility; back off to the
-    # scheduler block size.
+    # Mamba groups with block_size != cache_config.block_size arise in hybrid
+    # models (e.g. DFlash) where unify_kv_cache_spec_page_size scales the Mamba
+    # block_size upward to match the attention page size.  The original bail-out
+    # returned (scheduler_block_size, scheduler_block_size) — i.e. used the LCM
+    # as hash_block_size — but HybridKVCacheCoordinator then asserts that every
+    # group's block_size is divisible by hash_block_size.  When an attention
+    # group sits at the smaller block_size (e.g. 4368) and hash_block_size is
+    # the LCM (e.g. 8736), the assertion fails.  Using the GCD instead satisfies
+    # both the coordinator assertion (every block_size is a multiple of the GCD)
+    # and the original intent (finer hashing is disabled when Mamba
+    # mamba_cache_mode != "align").
     if any(
         isinstance(g.kv_cache_spec, MambaSpec)
         and g.kv_cache_spec.block_size != cache_config.block_size
         for g in groups
     ):
-        return scheduler_block_size, scheduler_block_size
+        return scheduler_block_size, math.gcd(*group_block_sizes)
 
     requested = cache_config.hash_block_size
     hash_block_size = (

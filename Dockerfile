@@ -1,4 +1,4 @@
-FROM ghcr.io/aeon-7/aeon-vllm-ultimate:latest@sha256:d74b35b7aeeebe9e5c386fe27241eada8732055ccc6e856a6fd000df00c6ca1a
+FROM ghcr.io/aeon-7/aeon-vllm-ultimate:latest@sha256:f6d453d0b4a7ef90eefee486f4ff769cc2e1bb1e206df16d70370da09c02203c
 
 # Fix 1: nvidia-cutlass-dsl 4.6.0 calls make_kwargs_wrapper(map_dataclass_to_tuple=...)
 # which was added in apache-tvm-ffi 0.1.11.  The base image ships 0.1.9.

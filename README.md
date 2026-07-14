@@ -3,7 +3,49 @@
 End-to-end guide for running `nvidia/Qwen3.5-122B-A10B-NVFP4` with `z-lab/Qwen3.5-122B-A10B-DFlash`
 speculative decoding on an NVIDIA DGX Spark (GB10, SM121a, 128 GB unified memory).
 
-**Status:** Working as of 2026-07-13. 4× concurrent OpenCode agents confirmed stable.
+**Status:** Working as of 2026-07-14. 4× concurrent OpenCode agents confirmed stable.
+
+## Background and motivation
+
+The NVIDIA DGX Spark (GB10 Superchip) is a unique machine: it pairs a full Blackwell GPU (SM121a)
+with 128 GB of unified CPU+GPU memory on a single SoC. This makes it possible to run frontier-scale
+MoE models like Qwen3.5-122B entirely in-memory on a single consumer-accessible device, with no
+multi-GPU coordination overhead.
+
+However, running such models at interactive latency is hard. NVFP4 quantization reduces the
+122B-parameter model to ~75 GB weight footprint, and at decode time the GPU generates tokens
+sequentially at ~10–16 tok/s without speculative decoding — acceptable for throughput, but slow
+for interactive use where time-to-first-token and inter-token latency matter.
+
+**DFlash** (Block Diffusion Flash, from z-lab) addresses this with a lightweight speculative
+decoding approach that uses the last 6 layers of Qwen3.5-122B itself as the draft model. Instead
+of running a separate smaller model, the draft produces multiple candidate tokens in a single
+non-causal forward pass, which the full 94-layer model then verifies. When the draft predicts
+correctly, multiple tokens are committed per step rather than one — reducing the number of full
+model passes needed per output token.
+
+This repository documents the bring-up work required to make DFlash work on the GB10 Spark
+under the aeon vLLM image (the only publicly available image with SM121a NVFP4 MoE kernels as
+of mid-2026), including 5 bug fixes that were needed to get past a series of errors during
+initialization and forward passes. The fixes are applied as a thin Dockerfile layer on top of
+the aeon base image.
+
+### Why this was nontrivial
+
+The DFlash draft model has an unusual architecture: it mixes sliding-window attention layers
+(SWA, layers 48–51), a Mamba SSM layer (layer 52), and a full-attention layer (layer 53).
+This hybrid layout exposed multiple bugs in vLLM's KV cache unification, FlashInfer backend,
+and the DFlash proposer itself — none of which appear when running standard dense or pure-MoE
+models. All 5 fixes are documented in detail below.
+
+### Primary use case
+
+This setup is optimized for interactive coding assistance via OpenCode agents. The real-world
+workload is 4–8 concurrent agents, each sending 1024-token prompts and expecting 512-token
+code completions. Benchmark results show 39.5 tok/s aggregate output at c=4 — roughly 10 tok/s
+per agent, which is fast enough for non-blocking agentic workflows.
+
+**Status:** Working as of 2026-07-14. 4× concurrent OpenCode agents confirmed stable.
 
 ---
 
@@ -226,6 +268,52 @@ yield. The draft forward-pass cost scales with speclen, so the optimal setting i
 expected AccLen. Real code workloads (OpenCode agents) likely have higher acceptance than
 random prompts — if AccLen rises above 4 in practice, increasing speclen to 12–16 may
 recapture throughput.
+
+## Further tuning opportunities
+
+These have not been benchmarked yet. Listed roughly in priority order.
+
+### 1. Tune `num_speculative_tokens` to your actual workload (high priority)
+
+The benchmarks above used random text, which is adversarial for speculative decoding (low
+repetition → low acceptance). On real code, AccLen is likely 3–5× rather than ~2. To find
+the optimal speclen for your workload:
+
+1. Run the server with the production workload for 10–15 minutes.
+2. Watch `spec_decode_acceptance_length` in the vLLM server logs (logged every 10s).
+3. Set `num_speculative_tokens` to `round(AccLen * 1.5)` — enough headroom to capture most
+   accepted tokens without paying excessive overhead on the tail.
+
+Rule of thumb: if AccLen on real traffic is ~4, try speclen=6 or 8. If AccLen is ~6, try 8–10.
+
+### 2. `--max-num-batched-tokens 16384` for long-context workloads
+
+Going from 4096→8192 gave +47% on long-c1. A further doubling to 16384 may yield additional
+gains on prompts approaching the full 192k context window. The warning
+`max_num_scheduled_tokens is set to N` will reduce by the spec token overhead
+(8 seqs × speclen tokens), but the headroom is now large enough that this rarely matters.
+Watch GPU memory — increase `--gpu-memory-utilization` slightly if KV cache shrinks too much.
+
+### 3. `--gpu-memory-utilization 0.90` (minor)
+
+vLLM logs that the effective utilization after CUDA graph profiling is ~0.87 when 0.88 is set.
+Bumping to 0.90 gives ~3% more KV cache (~560K → ~580K tokens) at low risk on 128 GB unified
+memory. Not worth benchmarking in isolation but worth combining with another change.
+
+### 4. `--max-num-seqs 4` at low concurrency
+
+The 8-sequence cap adds `8 × speclen` to the batch budget overhead. At c=1 workloads, capping
+at 4 sequences halves the overhead and may marginally improve single-stream TTFT. Only relevant
+if you exclusively run single requests.
+
+### 5. Prefix caching (blocked — see Known limitations)
+
+`--enable-prefix-caching` crashes at startup due to a `HybridKVCacheCoordinator` incompatibility.
+This would be the highest-value change for interactive use (repeated system prompts in OpenCode
+agents share large common prefixes). Requires a fix in vLLM's coordinator to handle DFlash's
+mixed block sizes — not patchable at the Python patch level without a more invasive change.
+
+---
 
 ## Known limitations
 

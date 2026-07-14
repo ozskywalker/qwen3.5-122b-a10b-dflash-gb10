@@ -79,7 +79,7 @@ As of 2026-07-14, `start_vllm_dflash.sh` runs:
 | `--max-num-batched-tokens` | 8192 | Doubled from 4096; +47% on long-context |
 | `num_speculative_tokens` | 8 (default arg) | Halved from 16; AccLen≈2 on random → better yield |
 | `enforce_eager` | not set | Draft CUDA graphs active; +9% single-stream |
-| `--enable-prefix-caching` | **not set** | Crashes — see Known issues below |
+| `--enable-prefix-caching` | set | Fixed in kv_cache_utils.py (Fix 6); recommended for interactive use |
 | `--gpu-memory-utilization` | 0.88 | ~543k token KV cache; 27 GiB available |
 | `--max-num-seqs` | 8 | Limits concurrent sequences |
 | `--max-model-len` | 196608 | Full 192k context |
@@ -164,7 +164,7 @@ AND volume-mounted at runtime (for live editing without rebuild):
 
 | File | Fixes |
 |---|---|
-| `patches/kv_cache_utils.py` | Fix 3a (page_size_padded scaling), Fix 3b (preserve sliding_window) |
+| `patches/kv_cache_utils.py` | Fix 3a (page_size_padded scaling), Fix 3b (preserve sliding_window), Fix 6 (prefix caching GCD hash_block_size) |
 | `patches/flashinfer.py` | Fix 4a (normalize mixed window_left), Fix 4b (relax forward assertion) |
 | `patches/dflash.py` | Fix 5 (multi-group KV, config, slot-mapping) |
 
@@ -175,14 +175,13 @@ because the volume mount overrides the baked-in copy.
 
 ## Known issues
 
-**`--enable-prefix-caching` crashes at startup.**
-```
-AssertionError: block_size must be divisible by hash_block_size
-```
-Root cause: `HybridKVCacheCoordinator` validates that all KV group block sizes are divisible
-by `hash_block_size` (defaults to scheduler block size, 16). DFlash's mixed
-Mamba+attention+draft groups have at least one group whose auto-computed block_size fails
-this check. Investigation starting point: `vllm/v1/core/kv_cache_coordinator.py:544`.
+**`--enable-prefix-caching` — FIXED (Fix 6 in `patches/kv_cache_utils.py`).**
+Previously crashed with `AssertionError: block_size must be divisible by hash_block_size`.
+Root cause: `resolve_kv_cache_block_sizes()` returned `hash_block_size = lcm(all groups) = 8736`,
+but one FullAttentionSpec group had `block_size = 4368` (4368 % 8736 ≠ 0).
+Fix: use `math.gcd(*group_block_sizes)` as hash_block_size in the Mamba bail-out path.
+With GCD=4368, all 9 group block sizes (4368 and 8736) divide evenly.
+The `start_vllm_dflash.sh` launch script now includes `--enable-prefix-caching`.
 
 **`max_num_scheduled_tokens` warning at startup.**
 ```

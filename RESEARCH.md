@@ -49,31 +49,29 @@ differs — DFlash proposes 8 at once vs MTP proposes 2 per main-model step.
 
 ---
 
-## 3. Prefix caching for DFlash (high value, medium difficulty)
+## 3. Prefix caching for DFlash ✓ FIXED
 
-**Hypothesis:** OpenCode agents share long system prompts (tool definitions, instructions).
-Prefix caching would allow the KV cache for the system prompt to be reused across requests,
-potentially cutting TTFT by 50–70% on repeated-prefix traffic.
+**Status:** Fixed in `patches/kv_cache_utils.py`. `--enable-prefix-caching` now starts cleanly.
 
-**The blocker:** `HybridKVCacheCoordinator.__init__` asserts `block_size % hash_block_size == 0`
-across all KV cache groups. DFlash's hybrid layout (Mamba + SWA attention + full attention +
-draft) produces multiple groups with heterogeneous block sizes, at least one of which fails
-the divisibility check.
+**Root cause (confirmed via debug diagnostic):**
+DFlash creates 9 KV cache groups: 6 MambaSpec (block_size=8736), 2 FullAttentionSpec
+(block_size=8736), 1 FullAttentionSpec (block_size=4368). The Mamba groups have
+block_size=2× because `unify_kv_cache_spec_page_size` scales them to match the attention
+page size. The old bail-out in `resolve_kv_cache_block_sizes` returned
+`hash_block_size = lcm(all groups) = 8736`, but `HybridKVCacheCoordinator` then failed
+`4368 % 8736 != 0` for the last FullAttentionSpec group.
 
-**What to investigate:**
-1. Identify exactly which group fails and what its block_size is (add logging to
-   `kv_cache_coordinator.py` before the failing assertion).
-2. The `hash_block_size` defaults to `scheduler_block_size` (16). Check whether rounding the
-   failing group's block_size up to the next multiple of 16 is safe — this may be a one-line
-   fix in `kv_cache_utils.py`.
-3. Alternatively, check if `hash_block_size` can be set to the GCD of all group block sizes
-   rather than defaulting to the scheduler block size.
+**Fix:** In the Mamba bail-out path, return `math.gcd(*group_block_sizes)` as `hash_block_size`
+instead of the LCM. Every group's block_size is a multiple of the GCD by definition, so the
+coordinator assertion can't fail. GCD([8736, 8736, ..., 4368]) = 4368.
 
 **Expected impact:** TTFT reduction of 40–70% for second and subsequent turns in a
-multi-turn conversation. This is the single highest-value unblocked feature.
+multi-turn conversation where requests share a long system prompt (e.g. OpenCode tool
+definitions). Now benchmarkable with label `04-dflash-prefix-c1`, `04-dflash-prefix-c4`, etc.
 
-**Difficulty:** Medium. Requires understanding the coordinator block-size math and verifying
-that hash collisions don't occur with the modified block size.
+**Note on hash granularity:** With `hash_block_size=4368`, prefix blocks are hashed at
+4368-token granularity (coarser than the typical 16-token default). This is expected and
+correct for this model — the large token granularity reflects the FP8 KV page size on GB10.
 
 ---
 

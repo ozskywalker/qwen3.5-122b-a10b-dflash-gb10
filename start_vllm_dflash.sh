@@ -19,7 +19,7 @@ IMAGE="aeon-vllm-tvm-fixed:latest"
 MAIN_MODEL="/models/models--nvidia--Qwen3.5-122B-A10B-NVFP4/snapshots/98915d837c4e7c87ac8296d02e89de19b3207e6d"
 DRAFT_MODEL="/models/models--z-lab--Qwen3.5-122B-A10B-DFlash/snapshots/bce6f76cef2027552bed4a8a1bc9c449def48f05"
 
-DFLASH_BLOCK_SIZE="${1:-16}"   # pass as first arg, defaults to 16
+DFLASH_BLOCK_SIZE="${1:-8}"    # pass as first arg, defaults to 8 (AccLen≈2 → better yield than 16)
 
 set -e
 
@@ -66,7 +66,8 @@ sudo docker run -d \
         --moe-backend flashinfer_b12x \
         --gpu-memory-utilization 0.88 \
         --max-num-seqs 8 \
-        --max-num-batched-tokens 8192
+        --max-num-batched-tokens 8192 \
+        --enable-prefix-caching
 
 echo ""
 echo "Container '${CONTAINER_NAME}' started. Tailing logs..."

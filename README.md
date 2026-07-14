@@ -341,12 +341,12 @@ The 8-sequence cap adds `8 × speclen` to the batch budget overhead. At c=1 work
 at 4 sequences halves the overhead and may marginally improve single-stream TTFT. Only relevant
 if you exclusively run single requests.
 
-### 5. Prefix caching (blocked — see Known limitations)
+### 5. Prefix caching real-traffic validation
 
-`--enable-prefix-caching` crashes at startup due to a `HybridKVCacheCoordinator` incompatibility.
-This would be the highest-value change for interactive use (repeated system prompts in OpenCode
-agents share large common prefixes). Requires a fix in vLLM's coordinator to handle DFlash's
-mixed block sizes — not patchable at the Python patch level without a more invasive change.
+Fix 6 resolved the startup crash and `05-dflash-prefix-*` benchmarks confirm ±0% impact on
+random-prompt throughput/ITL (expected — random prompts share no prefix). The TTFT benefit
+this was meant to unlock (repeated system prompts across OpenCode agent turns) has not yet
+been measured — needs a benchmark with a shared, repeated prefix rather than random text.
 
 ---
 
@@ -377,12 +377,14 @@ qwen3.5-dflash-gb10/
 ├── start_vllm_dflash.sh      # launch script (DFlash, recommended)
 ├── start_vllm_mtp.sh         # launch script (MTP baseline)
 ├── patches/
-│   ├── kv_cache_utils.py     # Fixes 3a + 3b
-│   ├── flashinfer.py         # Fixes 4a + 4b
-│   └── dflash.py             # Fix 5
+│   ├── kv_cache_utils.py      # Fixes 3a + 3b + Fix 6
+│   ├── flashinfer.py          # Fixes 4a + 4b
+│   └── dflash.py              # Fix 5
 └── bench-results/
-    ├── 00-baseline-*.json    # enforce_eager=true, max_batched=4096, speclen=16
-    ├── 01-batched8k-*.json   # max_batched=8192
-    ├── 02-no-eager-*.json    # CUDA graphs enabled for draft
-    └── 03-speclen8-*.json    # num_speculative_tokens=8 (final/best config)
+    ├── 00-baseline-*.json         # enforce_eager=true, max_batched=4096, speclen=16
+    ├── 01-batched8k-*.json        # max_batched=8192
+    ├── 02-no-eager-*.json         # CUDA graphs enabled for draft
+    ├── 03-speclen8-*.json         # num_speculative_tokens=8 (DFlash best config)
+    ├── 04-mtp-*.json              # MTP baseline (num_speculative_tokens=2)
+    └── 05-dflash-prefix-*.json    # DFlash speclen=8 + --enable-prefix-caching (Fix 6)
 ```

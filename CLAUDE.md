@@ -219,6 +219,9 @@ The Dockerfile base is pinned to a specific digest. To update the base image:
 
 See `RESEARCH.md` for the full list. Top priorities:
 1. Measure AccLen on real OpenCode traffic (may justify bumping speclen to 10–12)
-2. MTP vs DFlash head-to-head comparison
-3. Fix prefix caching incompatibility (high value, medium effort)
+2. ~~MTP vs DFlash head-to-head comparison~~ — done; MTP wins every scenario on random-text
+   benchmarks (+19–33% throughput). See README.md benchmark section. Open follow-up: whether
+   to switch the recommended default from DFlash to MTP pending real-code AccLen data.
+3. ~~Fix prefix caching incompatibility~~ — done (Fix 6). Benchmarked: ±0% on random text as
+   expected; TTFT win on repeated-prefix traffic still unmeasured.
 4. Add Prometheus scraping for live acceptance rate visibility

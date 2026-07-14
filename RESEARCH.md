@@ -26,26 +26,24 @@ on ITL and throughput. If AccLen is still ~2, speclen=4 may be even better than 
 
 ---
 
-## 2. MTP vs DFlash head-to-head comparison
+## 2. MTP vs DFlash head-to-head comparison ✓ DONE
 
-**Hypothesis:** DFlash's block-diffusion approach may not be straightforwardly better than
-vLLM's built-in MTP (Multi-Token Prediction) speculative decoding for this specific model
-on GB10. MTP uses the model's own hidden states and a small auxiliary head — very cheap —
-and may have higher acceptance on code where token distributions are sharp.
+**Result:** MTP (speclen=2) beats DFlash (speclen=8) on every scenario in the standard
+4-scenario matrix — see README.md "DFlash vs MTP head-to-head" table (labels `04-mtp-*` vs
+`05-dflash-prefix-*`). +19–33% throughput, −14–16% ITL. MTP's acceptance rate is 62–66% vs
+DFlash's 12–18%, because DFlash proposes 8 tokens per step and discards most of them on
+uncorrelated random text, while MTP proposes only 2 and almost all are accepted. Both land
+at a similar AccLen (~2.25) — the difference is entirely wasted draft-proposal overhead.
 
-**What to measure:**
-- Run the full 4-scenario benchmark matrix against `start_vllm_mtp.sh` (MTP with
-  `num_speculative_tokens=2`, which is currently configured).
-- Compare: throughput, TTFT, ITL, AccLen.
-- Note: MTP supports `--enable-prefix-caching`, which DFlash does not. This is a
-  significant advantage for interactive use.
+**Caveat:** benchmarked on random-text prompts only, which is adversarial for DFlash's
+block-diffusion draft (low token correlation). On real code (repetitive, structured), DFlash's
+acceptance rate may close the gap — this is untested. MTP also auto-selects the slower
+CUTLASS MoE kernel (B12X can't be shared with the BF16 MTP heads), so MTP's win happens
+*despite* a kernel disadvantage.
 
-**Key question:** Does DFlash's parallel block proposal (non-causal) beat MTP's sequential
-2-token proposal on code generation latency? On random prompts, DFlash got AccLen≈2 at
-speclen=8; MTP with speclen=2 would accept ~2 tokens sequentially. The forward-pass cost
-differs — DFlash proposes 8 at once vs MTP proposes 2 per main-model step.
-
-**Difficulty:** Low. MTP script already exists. Use `02-mtp-baseline` label prefix.
+**Open follow-up:** should `start_vllm_mtp.sh` / MTP become the recommended default for
+interactive use instead of DFlash, at least until real-code AccLen data comes in for DFlash?
+Not yet decided — CLAUDE.md's "Current best config" still documents the DFlash setup.
 
 ---
 
@@ -67,7 +65,12 @@ coordinator assertion can't fail. GCD([8736, 8736, ..., 4368]) = 4368.
 
 **Expected impact:** TTFT reduction of 40–70% for second and subsequent turns in a
 multi-turn conversation where requests share a long system prompt (e.g. OpenCode tool
-definitions). Now benchmarkable with label `04-dflash-prefix-c1`, `04-dflash-prefix-c4`, etc.
+definitions).
+
+**Benchmarked (labels `05-dflash-prefix-*`):** ±0% throughput/ITL vs `03-speclen8-*` on the
+standard random-prompt matrix — expected, since random prompts share no prefix to cache.
+The TTFT win this fix targets (repeated system prompts across turns) is still unmeasured;
+needs a benchmark with a deliberately shared/repeated prefix, not random text.
 
 **Note on hash granularity:** With `hash_block_size=4368`, prefix blocks are hashed at
 4368-token granularity (coarser than the typical 16-token default). This is expected and
